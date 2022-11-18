@@ -198,7 +198,6 @@ open(STDIN, q(</dev/null));
 open(STDOUT, q(>>/var/log/zdhcpd));
 open(STDERR, q(>>/dev/null));
 system(qq(echo $$ > /var/run/zdhcpd.pid));
-&log(q($Header: /home/wozzle/cvs/scripts/dhcpd.pl,v 1.12 2018/08/27 22:45:55 zac Exp $));
 
 &setup_sock;
 
