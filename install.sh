@@ -3,6 +3,9 @@ set -euxo pipefail
 
 systemctl stop zdhcpd.service
 systemctl disable zdhcpd.service
+if [[ ! -f /var/lib/hosts.db ]]; then
+	sqlite3 /var/lib/hosts.db < hosts.sql
+fi
 install -o root -g root -m 700 zdhcpd /usr/local/sbin/zdhcpd
 install -o root -g root -m 644 zdhcpd.service /lib/systemd/system/zdhcpd.service
 install -o root -g root -m 644 zdhcpd.logrotate /etc/logrotate.d/zdhcpd
