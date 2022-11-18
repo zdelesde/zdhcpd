@@ -1,0 +1,14 @@
+#!/usr/bin/perl
+
+use strict;
+use DBI;
+
+my $interface = shift;
+my $dbh = DBI->connect('DBI:SQLite:dbname=/var/lib/hosts.db', '', '', { AutoCommit => 1 }) or die DBI->errstr;
+my $select = $dbh->prepare_cached(q(select * from hosts where interface = ? and mac is not null order by length(ip),ip));
+
+$select->execute($interface);
+while (local $_ = $select->fetchrow_hashref) {
+	$_->{mac} =~ s/^(..)(..)(..)(..)(..)(..)$/$1:$2:$3:$4:$5:$6/;
+	printf(qq(dhcp-host=%s,%s\n), $_->{mac}, $_->{ip});
+}

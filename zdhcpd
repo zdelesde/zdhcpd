@@ -1,0 +1,242 @@
+#!/usr/bin/perl
+
+use strict;
+
+use Net::DHCP::Packet;
+use Net::DHCP::Constants;
+use POSIX qw(setsid strftime);
+use IO::Socket;
+use bytes;
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+use Sys::Hostname;
+use DBI;
+
+$|++;
+
+my $interface = shift;
+$interface = 'br0';
+my $hostname = &hostname;
+my $broadcast = sockaddr_in( 68, INADDR_BROADCAST );
+my $transaction = 0; # report transaction number
+my $sock;
+my $r;
+my $request;
+my $response;
+my $last = 0;
+
+my $dbh;
+my $decline_ip;
+
+sub SO_BINDTODEVICE { 25 }
+sub DHCP_LEASE_TIME { 60 * 60 * 24 }
+
+################################################################################
+sub setup_sock {
+	$sock = IO::Socket->new or die $!;
+
+	socket( $sock, PF_INET, SOCK_DGRAM, getprotobyname('udp') ) or die "socket: $!";
+	setsockopt( $sock, SOL_SOCKET, SO_BINDTODEVICE, pack( 'Z*', $interface ) ) or die "setsockopt: $!";
+	setsockopt( $sock, SOL_SOCKET, SO_REUSEADDR, 1 ) or die "setsockopt: $!";
+	setsockopt( $sock, SOL_SOCKET, SO_BROADCAST, 1 ) or die "setsockopt: $!";
+	bind( $sock, sockaddr_in( 67, INADDR_ANY ) ) or die "bind: $!";
+}
+
+################################################################################
+sub setup_dbh {
+	$dbh = DBI->connect('DBI:SQLite:dbname=/var/lib/hosts.db', '', '', { AutoCommit => 1 }) or die DBI->errstr;
+	$decline_ip = $dbh->prepare_cached(q(update hosts set mac = 'dddddddddddd' where interface = ? and mac = ?));
+}
+
+################################################################################
+sub sockaddr {
+	my $from = shift;
+	my ($port, $inet) = unpack_sockaddr_in($from);
+	my $ip = inet_ntoa($inet);
+	return ($ip, $port);
+}
+
+################################################################################
+sub log {
+	my $str = shift;
+	print STDOUT strftime '%Y/%m/%d %H:%M:%S ', localtime;
+	print STDOUT "$str\n";
+}
+
+################################################################################
+sub get_ip {
+	if (my $s = $dbh->prepare(q(select ip from hosts where interface = ? and mac = ?))) {
+		$s->execute(qq($hostname/$interface), $r->{chaddr});
+		if (my ($ip) = $s->fetchrow_array) {
+			return $ip;
+		}
+	}
+	if (my $s = $dbh->prepare(q(select ip from hosts where interface = ? and expire is not null and expire < datetime() order by expire limit 1))) {
+		$s->execute(qq($hostname/$interface));
+		if (my ($ip) = $s->fetchrow_array) {
+			return $ip;
+		}
+	}
+	return undef;
+}
+
+################################################################################
+sub lease_ip {
+	my $requested = shift;
+	my $select = $dbh->prepare(q(select * from hosts where interface = ? and ip = ?));
+	if ($select->execute(qq($hostname/$interface), $requested)) {
+		if (my $lease = $select->fetchrow_hashref) {
+			my $update = $dbh->prepare(q(update hosts set mac = ?, client = ?, expire = ?, count = ? where interface = ? and ip = ? and (mac = ? or expire < datetime()) and count = ?));
+			if ($update->execute($r->{chaddr}, $r->{client}, &strftime(q(%Y-%m-%d %H:%M:%S), localtime(time + DHCP_LEASE_TIME)), $lease->{count} + 1, "$hostname/$interface", $lease->{ip}, $r->{chaddr}, $lease->{count})) {
+				return $update->rows;
+			}
+			else {
+				&log(sprintf("ERROR (lease_ip): %s", $update->errstr));
+			}
+		}
+	}
+	return undef;
+}
+
+################################################################################
+sub set_dhcp_options {
+	$response->addOptionValue( DHO_DHCP_LEASE_TIME, DHCP_LEASE_TIME );
+	$response->addOptionValue( DHO_DOMAIN_NAME, qw(wozzle.com) );
+#	$response->addOptionValue( DHO_WPAD_URL, q(http://kermit.wozzle.com/wpad.dat) );
+	$response->addOptionValue( DHO_DHCP_SERVER_IDENTIFIER, qw(10.168.0.3) );
+	$response->addOptionValue( DHO_SUBNET_MASK, qw(255.255.255.0) );
+	$response->addOptionValue( DHO_ROUTERS, qw(10.168.0.3) );
+	$response->addOptionValue( DHO_TIME_SERVERS, qw(10.168.0.3) );
+	$response->addOptionValue( DHO_DOMAIN_NAME_SERVERS, qw(10.168.0.3) );
+
+	$response->siaddr('10.168.0.6');
+	$response->file('/pxelinux.0');
+}
+
+################################################################################
+sub do_discover {
+	&log(sprintf('Received DHCPDISCOVER from %s / %s / "%s"', $r->{ip}, $r->{chaddr}, $r->{client}));
+	my $offered = &get_ip;
+	return unless ($offered);
+
+	$response = Net::DHCP::Packet->new(
+		Comment => $request->comment(),
+		Op => BOOTREPLY(),
+		Hops => $request->hops(),
+		Xid => $request->xid(),
+		Flags => $request->flags(),
+		Yiaddr => $offered,
+		Ciaddr => $request->ciaddr(),
+#		Siaddr => $request->siaddr(),
+		Giaddr => $request->giaddr(),
+		Chaddr => $request->chaddr(),
+		DHO_DHCP_MESSAGE_TYPE() => DHCPOFFER(),
+	);
+
+	&set_dhcp_options;
+
+	&log(sprintf('Sending DHCPOFFER for %s to %s', $offered, $r->{chaddr}));
+	$sock->send( $response->serialize(), undef, $broadcast )
+		or die "Error sending DHCPOFFER: $!\n";
+
+}
+
+################################################################################
+sub do_request {
+	my $requested = $request->getOptionValue( DHO_DHCP_REQUESTED_ADDRESS() ) || $request->ciaddr();
+	&log(sprintf('Received DHCPREQUEST for %s from %s / %s / "%s"', $requested, $r->{ip}, $r->{chaddr}, $r->{client}));
+
+	if ( &lease_ip($requested) ) {
+		$response = Net::DHCP::Packet->new(
+			Comment => $request->comment(),
+			Op => BOOTREPLY(),
+			Hops => $request->hops(),
+			Xid => $request->xid(),
+			Flags => $request->flags(),
+			Yiaddr => $requested,
+			Ciaddr => $request->ciaddr(),
+#			Siaddr => $request->siaddr(),
+			Giaddr => $request->giaddr(),
+			Chaddr => $request->chaddr(),
+			DHO_DHCP_MESSAGE_TYPE() => DHCPACK(),
+		);
+		&set_dhcp_options;
+		&log(sprintf('Sending DHCPACK for %s to %s', $requested, $r->{chaddr}));
+
+	} else {
+		$response = Net::DHCP::Packet->new(
+			Comment => $request->comment(),
+			Op => BOOTREPLY(),
+			Hops => $request->hops(),
+			Xid => $request->xid(),
+			Flags => $request->flags(),
+			Yiaddr => '0.0.0.0',
+			Ciaddr => $request->ciaddr(),
+#			Siaddr => $request->siaddr(),
+			Giaddr => $request->giaddr(),
+			Chaddr => $request->chaddr(),
+			DHO_DHCP_MESSAGE_TYPE() => DHCPNAK(),
+			DHO_DHCP_MESSAGE() => 'Bad request...',
+		);
+		&log(sprintf('Sending DHCPNAK for %s to %s', $requested, $r->{chaddr}));
+	}
+
+	$sock->send( $response->serialize(), undef, ($r->{ip} eq '0.0.0.0' ? $broadcast : ()))
+		or die "Error sending DHCPACK/DHCPNAK: $!\n";
+}
+
+################################################################################
+sub do_decline {
+	&log(sprintf('Received DHCPDECLINE from %s / %s / "%s"', $r->{ip}, $r->{chaddr}, $r->{client}));
+	$decline_ip->execute($interface, $r->{chaddr});
+}
+
+################################################################################
+exit if fork; &setsid; exit if fork;
+chdir(q(/tmp));
+open(STDIN, q(</dev/null));
+open(STDOUT, q(>>/var/log/zdhcpd));
+open(STDERR, q(>>/dev/null));
+system(qq(echo $$ > /var/run/zdhcpd.pid));
+&log(q($Header: /home/wozzle/cvs/scripts/dhcpd.pl,v 1.12 2018/08/27 22:45:55 zac Exp $));
+
+&setup_sock;
+
+while (1) {
+	my $packet = undef;
+	$r = {};
+
+	# receive packet
+	my $from = $sock->recv( $packet, 4096 ) or &log("recv: $!");
+	next if ($!); # continue loop if an error occured
+	my ($ip, $port) = &sockaddr($from);
+	$transaction++; # transaction counter
+	$r->{time} = time;
+	$r->{ip} = $ip;
+	$r->{port} = $port;
+
+	if ($r->{time} - $last > 300) {
+		&setup_dbh;
+		$last = $r->{time};
+	}
+
+	$request = Net::DHCP::Packet->new($packet);
+	$request->comment($transaction);
+
+	$r->{type} = $request->getOptionValue( DHO_DHCP_MESSAGE_TYPE() );
+	$r->{client} = $request->getOptionValue(DHO_HOST_NAME);
+	$r->{chaddr} = substr($request->chaddr(), 0, 2 * $request->hlen());
+
+	if ( $r->{type} eq DHCPDISCOVER() ) {
+		&do_discover;
+	}
+	elsif ( $r->{type} eq DHCPREQUEST() ) {
+		&do_request;
+	}
+	elsif ( $r->{type} eq DHCPDECLINE() ) {
+		&do_decline;
+	}
+	else {
+		&log(sprintf('Received MESSAGE_TYPE_%d from %s / %s / "%s"', $r->{type}, $r->{ip}, $r->{chaddr}, $r->{client}));
+	}
+}

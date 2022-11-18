@@ -1,0 +1,12 @@
+[Unit]
+Description=Local DHCP Helper
+After=network.target
+
+[Service]
+ExecStart=/usr/local/sbin/zdhcpd
+Type=forking
+Restart=on-failure
+PIDFile=/var/run/zdhcpd.pid
+
+[Install]
+WantedBy=multi-user.target

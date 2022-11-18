@@ -1,0 +1,8 @@
+/var/log/zdhcpd {
+    missingok
+    nocreate
+    sharedscripts
+    postrotate
+        systemctl restart zdhcpd.service
+    endscript
+}

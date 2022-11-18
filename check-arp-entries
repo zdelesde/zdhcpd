@@ -1,0 +1,30 @@
+#!/usr/bin/perl
+
+use strict;
+use POSIX qw(:sys_wait_h &strftime &setuid &setgid &setsid &tmpnam);
+#use warnings;
+use DBI;
+use Data::Dumper; $Data::Dumper::Indent = 0;
+
+$|++;
+
+my $dbh = DBI->connect('DBI:SQLite:dbname=/var/lib/hosts.db', '', '', { AutoCommit => 1 }) or die DBI->errstr;
+my $gethost = $dbh->prepare_cached(q(select * from hosts where mac = ?));
+
+#die $? unless (open(IN, q(arp -an |)));
+while (<>) {
+	if (my ($i, $m) = /\((\d+\.\d+\.\d+\.\d+)\) at (\w+:\w+:\w+:\w+:\w+:\w+) \[ether\]/) {
+		eval {
+			$m =~ s/://g;
+			die qq(db error!\n) unless $gethost->execute($m);
+			die qq(mac not found: $m/$i\n) unless (my $h = $gethost->fetchrow_hashref);
+			die qq(ip mismatch: $h->{ip} ne $i\n) unless ($h->{ip} eq $i);
+		};
+		if ($@) {
+			print $@;
+		}
+	}
+	else {
+		print "line not matched\n";
+	}
+}
