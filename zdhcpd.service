@@ -1,5 +1,5 @@
 [Unit]
-Description=Local DHCP Helper
+Description=Zacs DHCP Server
 After=network.target
 
 [Service]

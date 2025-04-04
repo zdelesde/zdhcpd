@@ -30,6 +30,14 @@ my $decline_ip;
 
 sub SO_BINDTODEVICE { 25 }
 sub DHCP_LEASE_TIME { 60 * 60 * 24 }
+sub DOMAIN_NAME { q(wozzle.com) }
+sub DHCP_SERVER_IDENTIFIER { q(10.168.0.1) }
+sub SUBNET_MASK { q(255.255.255.0) }
+sub ROUTERS { q(10.168.0.1) }
+sub DOMAIN_NAME_SERVERS { q(10.168.0.1) }
+sub TIME_SERVERS { q(10.168.0.1) }
+sub PXE_SERVER { q(10.168.0.6) }
+sub PXE_KERNEL { q(/pxelinux.0) }
 
 ################################################################################
 sub setup_sock {
@@ -101,16 +109,15 @@ sub lease_ip {
 ################################################################################
 sub set_dhcp_options {
 	$response->addOptionValue( DHO_DHCP_LEASE_TIME, DHCP_LEASE_TIME );
-	$response->addOptionValue( DHO_DOMAIN_NAME, qw(wozzle.com) );
-#	$response->addOptionValue( DHO_WPAD_URL, q(http://kermit.wozzle.com/wpad.dat) );
-	$response->addOptionValue( DHO_DHCP_SERVER_IDENTIFIER, qw(10.168.0.3) );
-	$response->addOptionValue( DHO_SUBNET_MASK, qw(255.255.255.0) );
-	$response->addOptionValue( DHO_ROUTERS, qw(10.168.0.3) );
-	$response->addOptionValue( DHO_TIME_SERVERS, qw(10.168.0.3) );
-	$response->addOptionValue( DHO_DOMAIN_NAME_SERVERS, qw(10.168.0.3) );
+	$response->addOptionValue( DHO_DOMAIN_NAME, DOMAIN_NAME );
+	$response->addOptionValue( DHO_DHCP_SERVER_IDENTIFIER, DHCP_SERVER_IDENTIFIER );
+	$response->addOptionValue( DHO_SUBNET_MASK, SUBNET_MASK );
+	$response->addOptionValue( DHO_ROUTERS, ROUTERS );
+	$response->addOptionValue( DHO_TIME_SERVERS, TIME_SERVERS );
+	$response->addOptionValue( DHO_DOMAIN_NAME_SERVERS, DOMAIN_NAME_SERVERS );
 
-	$response->siaddr('10.168.0.6');
-	$response->file('/pxelinux.0');
+	$response->siaddr( PXE_SERVER );
+	$response->file( PXE_KERNEL );
 }
 
 ################################################################################
